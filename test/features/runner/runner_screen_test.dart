@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:genui/genui.dart';
 import 'package:genui_app_maker/ai/app_session.dart';
+import 'package:genui_app_maker/ai/firebase_app_generator.dart';
+import 'package:genui_app_maker/catalog/app_catalog.dart';
 import 'package:genui_app_maker/features/runner/error_message.dart';
 import 'package:genui_app_maker/features/runner/runner_screen.dart';
 import 'package:genui_app_maker/features/runner/surface_view.dart';
@@ -59,6 +61,37 @@ void main() {
   );
 
   Finder inputField() => find.widgetWithText(TextField, '수정할 내용을 입력하세요');
+
+  bool saveEnabled(WidgetTester tester) =>
+      tester
+          .widget<IconButton>(
+            find.widgetWithIcon(IconButton, Icons.save_outlined),
+          )
+          .onPressed !=
+      null;
+
+  /// 생명주기는 inactive → hidden → paused 순서로만 바뀔 수 있다.
+  Future<void> goToBackground(WidgetTester tester) async {
+    for (final state in const [
+      AppLifecycleState.inactive,
+      AppLifecycleState.hidden,
+      AppLifecycleState.paused,
+    ]) {
+      tester.binding.handleAppLifecycleStateChanged(state);
+    }
+    await tester.pumpAndSettle();
+  }
+
+  Future<void> comeBack(WidgetTester tester) async {
+    for (final state in const [
+      AppLifecycleState.hidden,
+      AppLifecycleState.inactive,
+      AppLifecycleState.resumed,
+    ]) {
+      tester.binding.handleAppLifecycleStateChanged(state);
+    }
+    await tester.pumpAndSettle();
+  }
 
   testWidgets('new prompt renders the generated notes surface', (tester) async {
     await openNew(tester);
@@ -169,6 +202,77 @@ void main() {
     expect(harness.generator.requests.last.text, '메모장 만들어줘');
     expect(find.text('다시 시도'), findsNothing);
     expect(find.text('첫 메모'), findsOneWidget);
+  });
+
+  testWidgets('retry after a failed clarify answer resends the answer', (
+    tester,
+  ) async {
+    harness = SessionHarness([
+      clarifyResponse,
+      notesAfterClarifyResponse,
+    ], catalog: buildAppCatalog());
+    await openNew(tester);
+    expect(find.text('어떤 앱을 만들까요?'), findsOneWidget);
+
+    harness.generator.nextError = StateError('offline');
+    await tester.tap(find.text('메모장'));
+    await tester.pump();
+    await tester.tap(find.text('만들기'));
+    await tester.pumpAndSettle();
+
+    expect(harness.generator.requests, hasLength(2));
+    final String answer = chatMessageToPromptText(
+      harness.generator.requests[1],
+    );
+    expect(answer, contains('clarify_answered'));
+    expect(find.text('다시 시도'), findsOneWidget);
+
+    await tester.tap(find.text('다시 시도'));
+    await tester.pumpAndSettle();
+
+    // 첫 프롬프트가 아니라 실패한 답변이 그대로 다시 간다.
+    expect(harness.generator.requests, hasLength(3));
+    expect(chatMessageToPromptText(harness.generator.requests[2]), answer);
+    expect(find.text('어떤 앱을 만들까요?'), findsNothing);
+    expect(find.text('첫 메모'), findsOneWidget);
+    expect(saveEnabled(tester), isTrue);
+  });
+
+  testWidgets('a question card cannot be saved and leaving it does not ask', (
+    tester,
+  ) async {
+    harness = SessionHarness([clarifyResponse], catalog: buildAppCatalog());
+    await openNew(tester);
+    expect(find.text('어떤 앱을 만들까요?'), findsOneWidget);
+    expect(saveEnabled(tester), isFalse);
+
+    await goToBackground(tester);
+    expect(repository.saved, isEmpty);
+    await comeBack(tester);
+
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+    expect(find.byType(AlertDialog), findsNothing);
+    expect(find.byType(RunnerScreen), findsNothing);
+  });
+
+  testWidgets('an unsaved app is saved under the default name in background', (
+    tester,
+  ) async {
+    await openNew(tester);
+
+    await goToBackground(tester);
+    final SavedApp saved = repository.saved.single;
+    expect(saved.name, '메모장 만들어줘');
+    expect(saved.transcript, contains('createSurface'));
+    await comeBack(tester);
+
+    // 이미 저장됐으므로 뒤로 가기는 묻지 않고 같은 앱을 덮어쓴다.
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+    expect(find.byType(AlertDialog), findsNothing);
+    expect(find.byType(RunnerScreen), findsNothing);
+    expect(repository.apps.single.id, saved.id);
   });
 
   testWidgets('save asks for a name and stores transcript and data', (

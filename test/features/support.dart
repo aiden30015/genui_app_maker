@@ -42,6 +42,39 @@ const renameResponse = '''
 ```
 ''';
 
+/// 만들기 전에 되묻는 응답. 카탈로그에 `ClarifyQuestions`가 있어야 그려진다.
+const clarifyResponse = '''
+어떤 앱인지 먼저 여쭤볼게요.
+
+```json
+{"version":"v0.9","createSurface":{"surfaceId":"main","catalogId":"https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json","sendDataModel":true}}
+```
+
+```json
+{"version":"v0.9","updateComponents":{"surfaceId":"main","components":[
+ {"id":"root","component":"ClarifyQuestions","title":"어떤 앱을 만들까요?","questions":[{"id":"kind","text":"종류","options":["메모장","할 일"]}]}
+]}}
+```
+''';
+
+/// 되묻기 답변 뒤에 같은 surface를 앱으로 바꾸는 응답(`createSurface` 없음).
+const notesAfterClarifyResponse = '''
+메모장을 만들었습니다.
+
+```json
+{"version":"v0.9","updateDataModel":{"surfaceId":"main","path":"/","value":{"notes":[{"text":"첫 메모"}]}}}
+```
+
+```json
+{"version":"v0.9","updateComponents":{"surfaceId":"main","components":[
+ {"id":"root","component":"Column","children":["title","notes"]},
+ {"id":"title","component":"Text","text":"메모장","variant":"h2"},
+ {"id":"notes","component":"List","children":{"componentId":"noteRow","path":"/notes"}},
+ {"id":"noteRow","component":"Text","text":{"path":"text"}}
+]}}
+```
+''';
+
 /// 테스트용 메모리 저장소.
 class InMemoryRepository implements SavedAppRepository {
   InMemoryRepository([List<SavedApp> initial = const []]) : apps = [...initial];
@@ -96,9 +129,11 @@ class GatedGenerator implements AppGenerator {
 
 /// 세션 팩토리와, 만들어진 세션·생성기를 테스트에서 들여다보기 위한 묶음.
 class SessionHarness {
-  SessionHarness(this.responses);
+  SessionHarness(this.responses, {Catalog? catalog})
+    : catalog = catalog ?? BasicCatalogItems.asNoAssetCatalog();
 
   final List<String> responses;
+  final Catalog catalog;
   final List<FakeAppGenerator> generators = [];
   final List<AppSession> sessions = [];
 
@@ -110,10 +145,7 @@ class SessionHarness {
 
   AppSession create() {
     final generator = FakeAppGenerator(responses)..nextError = firstError;
-    final session = AppSession(
-      catalog: BasicCatalogItems.asNoAssetCatalog(),
-      generator: generator,
-    );
+    final session = AppSession(catalog: catalog, generator: generator);
     generators.add(generator);
     sessions.add(session);
     return session;

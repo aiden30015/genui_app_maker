@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:genui/genui.dart';
 
+import '../catalog/clarify_questions.dart';
 import '../storage/saved_app.dart';
 import 'app_generator.dart';
 
@@ -47,6 +48,31 @@ class AppSession {
   Future<void> send(String text) =>
       _conversation.sendRequest(ChatMessage.user(text));
 
+  /// 마지막으로 모델에 보낸 요청(데이터를 덧붙이기 전 원본).
+  ///
+  /// 입력창에서 보낸 문장뿐 아니라 되묻기 답변처럼 화면 버튼에서 나간 요청도
+  /// 같은 [_onSend]를 지나므로 여기에 남는다.
+  ChatMessage? _lastRequest;
+
+  bool get canRetry => _lastRequest != null;
+
+  /// 마지막 요청을 그대로 다시 보낸다.
+  ///
+  /// 실패한 요청은 생성기 대화 이력에 남지 않으므로 다시 보내도 중복되지 않는다.
+  /// 데이터 모델은 [_onSend]에서 지금 값으로 다시 덧붙는다.
+  Future<void> retryLast() {
+    final ChatMessage? last = _lastRequest;
+    if (last == null) return Future<void>.value();
+    return _conversation.sendRequest(last);
+  }
+
+  /// 화면이 아직 앱이 아니라 질문 카드(`ClarifyQuestions`)인지.
+  bool get isAskingQuestions => state.value.surfaces.any(
+    (id) =>
+        controller.contextFor(id).definition.value?.components['root']?.type ==
+        clarifyQuestionsItem.name,
+  );
+
   /// 현재 surface별 데이터 모델 스냅샷.
   Map<String, Object?> dataSnapshot() => {
     for (final String id in state.value.surfaces)
@@ -76,6 +102,7 @@ class AppSession {
   }
 
   Future<void> _onSend(ChatMessage message) async {
+    _lastRequest = message;
     final ChatMessage request = _withData(message);
     final response = StringBuffer();
     await for (final String chunk in generator.generate(request)) {

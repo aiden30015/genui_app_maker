@@ -49,8 +49,6 @@ class _RunnerScreenState extends State<RunnerScreen> {
   /// null이 아니면 이미 저장된 앱이다. 이후 저장은 같은 id를 덮어쓴다.
   SavedApp? _saved;
 
-  /// 재시도 때 다시 보낼, 사용자가 마지막으로 입력한 요청.
-  String? _lastRequest;
   Object? _error;
 
   /// 이번 응답에서 모델이 보낸 일반 텍스트 조각을 이어 붙인 것.
@@ -81,14 +79,22 @@ class _RunnerScreenState extends State<RunnerScreen> {
       _session.restore(savedApp);
     } else {
       _firstPrompt = widget.prompt!.trim();
-      _lastRequest = _firstPrompt;
       _dispatch(_firstPrompt);
     }
   }
 
-  /// 이미 저장된 앱만 조용히 덮어쓴다. 응답 중에는 원문이 반쯤 온 상태라 건너뛴다.
+  /// 저장할 만한 앱이 화면에 있는지.
+  ///
+  /// 응답 중에는 원문이 반쯤 온 상태이고, 질문 카드는 아직 앱이 아니다.
+  bool _canSave(ConversationState state) =>
+      state.surfaces.isNotEmpty &&
+      !state.isWaiting &&
+      !_session.isAskingQuestions;
+
+  /// 백그라운드로 가면 조용히 저장한다. 아직 저장하지 않은 앱은 기본 이름으로
+  /// 새로 저장한다. 앱이 그대로 종료되면 저장 버튼을 누를 기회가 없기 때문이다.
   void _saveOnPause() {
-    if (_saved == null || _session.state.value.isWaiting) return;
+    if (!_canSave(_session.state.value)) return;
     _persist().catchError((Object _) {});
   }
 
@@ -115,16 +121,17 @@ class _RunnerScreenState extends State<RunnerScreen> {
         if (_collectText) setState(() => _modelText += text);
       case ConversationError(:final error):
         setState(() => _error = error);
+      case ConversationComponentsUpdated():
+        // 질문 카드가 앱으로 바뀌면 저장 버튼 상태도 바뀐다. 컴포넌트 갱신은
+        // ConversationState를 바꾸지 않아 따로 다시 그린다.
+        setState(() {});
       default:
         break;
     }
   }
 
   void _send(String text) {
-    setState(() {
-      _error = null;
-      _lastRequest = text;
-    });
+    setState(() => _error = null);
     _dispatch(text);
   }
 
@@ -144,9 +151,14 @@ class _RunnerScreenState extends State<RunnerScreen> {
     _send(text);
   }
 
-  void _retry() {
-    final String? last = _lastRequest;
-    if (last != null) _send(last);
+  /// 실패한 요청을 다시 보낸다. 되묻기 답변이 실패했다면 그 답변이 다시 간다.
+  Future<void> _retry() async {
+    setState(() => _error = null);
+    try {
+      await _session.retryLast();
+    } catch (error) {
+      if (mounted) setState(() => _error = error);
+    }
   }
 
   String get _defaultName {
@@ -256,11 +268,12 @@ class _RunnerScreenState extends State<RunnerScreen> {
       valueListenable: _session.state,
       builder: (context, state, _) {
         final bool hasSurface = state.surfaces.isNotEmpty;
+        final bool canSave = _canSave(state);
         final String text = _modelText.trim();
         final Object? error = _error;
         return PopScope(
-          // 잃을 것이 없을 때만 바로 나간다.
-          canPop: _saved == null && !hasSurface,
+          // 잃을 것이 없을 때만 바로 나간다. 질문 카드만 있으면 잃을 것이 없다.
+          canPop: _saved == null && (!hasSurface || _session.isAskingQuestions),
           onPopInvokedWithResult: (didPop, _) {
             if (!didPop) _onPopBlocked();
           },
@@ -275,9 +288,7 @@ class _RunnerScreenState extends State<RunnerScreen> {
                 IconButton(
                   tooltip: '저장',
                   icon: const Icon(Icons.save_outlined),
-                  onPressed: hasSurface && !state.isWaiting
-                      ? _onSavePressed
-                      : null,
+                  onPressed: canSave ? _onSavePressed : null,
                 ),
               ],
               bottom: PreferredSize(
@@ -298,7 +309,7 @@ class _RunnerScreenState extends State<RunnerScreen> {
                 if (error != null)
                   ErrorPanel(
                     error: error,
-                    onRetry: _lastRequest != null && !state.isWaiting
+                    onRetry: _session.canRetry && !state.isWaiting
                         ? _retry
                         : null,
                   ),
